@@ -2,5 +2,17 @@
   "C_Cpp.intelliSenseEngine": "default",
   "idf.flashType": "UART",
   "idf.port": "/dev/ttyACM0",
-  "idf.adapterTargetName": "esp32c3"
+  "idf.adapterTargetName": "esp32c3",
+  "files.associations": {
+    "gpio.h": "c",
+    "array": "cpp",
+    "deque": "cpp",
+    "list": "cpp",
+    "string": "cpp",
+    "unordered_map": "cpp",
+    "vector": "cpp",
+    "string_view": "cpp",
+    "initializer_list": "cpp",
+    "regex": "cpp"
+  }
 }
