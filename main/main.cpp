@@ -9,6 +9,10 @@
 
 #include <sys/param.h>
 
+#include <functional>
+#include <numeric>
+#include <vector>
+
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -87,6 +91,20 @@ static void configure_tempsensor(void) {
 
 }
 
+
+gptimer_handle_t pwm_timer;
+
+#define PWM_RESOLUTION 32768
+#define PWM_SPEED 5// in Hz
+#define TEMP_HISTORY_SIZE 900   // how many samples to collect in total
+#define TEMP_HISTORY_PID  50   // how many samples to use to do PID
+
+//#define PRINTFS 1
+
+int pwm_value = 1;
+float temp_target = 91.0f;
+
+
 void receiver_task(void *pvParameter) {
     ESP_LOGI("task", "Created: thermocouple_task");
     QueueHandle_t thermocouple_queue = (QueueHandle_t)pvParameter;
@@ -98,21 +116,77 @@ void receiver_task(void *pvParameter) {
     }
     while(1){
         xQueueReceive(thermocouple_queue,&item,(TickType_t )(1000/portTICK_PERIOD_MS)); 
-        printf("Struct Received on Queue:\nTemperature: %0.2f\n", item.temperature);
-        if (tempHistory.size() > 90)
+        #ifdef PRINTFS
+            printf("Struct Received on Queue:\nTemperature: %0.2f Target %.2f\n", item.temperature, temp_target);
+        #endif
+        while (tempHistory.size() > TEMP_HISTORY_SIZE)
             tempHistory.erase(tempHistory.begin());
         tempHistory.push_back(item.temperature);
-        vTaskDelay(1000/portTICK_PERIOD_MS);
+        
+        /* Regulator */
+        // temp_target
+        float temp_current = item.temperature;//tempHistory.back();
+        
+        float e = temp_target - temp_current;
+
+        float I = 0.0f;
+        int integration_start = std::max(0, (int)(tempHistory.size() - TEMP_HISTORY_PID));
+        for (int i = integration_start; i < tempHistory.size() - 1; i++) {
+            I += temp_target - tempHistory[i];
+        }
+
+        float D = 0.f;
+        const float D_epsilon = 3; // how large epsilon is for taking derivatives, in samples, >= 1
+        if (tempHistory.size() > D_epsilon + 2) {
+            float e2 = temp_target - tempHistory[tempHistory.size()- 1];
+            float e1 = temp_target - tempHistory[tempHistory.size()- 1 - D_epsilon];
+            D = e2 - e1;
+        }
+        D = D / (0.2 * D_epsilon); // 200ms per sample, 5 samples for derivative
+
+        // Kp * Td is the time constant the controller tries to reach the target temperature
+        // Kp * Ti is the time the regulator tolerates being off target
+
+        // original values  0.5     2.  3.
+        //                  0.5     2.  1.                          d            --> 4°C variance when brewing, big oscillations
+        //                  0.25    2.  1.                                      --> 1.5° idle variance, 2° variance when brewing and no overshoot
+        //                  0.25    2.  1. D_epsilon von 5 auf 3 reduziert      --> struggles to reach target temperature
+        //                  0.25    1.   1. D_epsilon 3 Integration 50 samples
+
+        const float Kp = 0.25;
+        const float Ti = 1. * 5. * TEMP_HISTORY_PID; /* 5 Hz sampling, 100 points */; //
+        const float Td = 3.;
+        float pid_value = Kp*(e + 1.f/Ti * I + Td * D);
+
+
+        #ifdef PRINTFS
+            printf("e %.2f Regulator value: %d PID Value %.2f\n", e, pwm_value, pid_value);
+            printf("Kp %4.4f * e %4.2f = %4.2f\n", Kp, e, Kp * e);
+            printf("Ti %4.4f * I %4.2f = %4.2f * Kp = %4.2f\n", 1.f/Ti, I, 1.f/Ti * I, 1.f/Ti * I * Kp);
+            printf("Td %4.4f * D %4.2f = %4.2f * Kp = %4.2f\n", Td, D, Td*D, Td * D * Kp);
+        #endif
+
+        vTaskDelay(200/portTICK_PERIOD_MS);
+
+        if (pid_value < 0.) {
+            pwm_value = 1;
+        } else {
+            if (pid_value > 1.)
+                pid_value = 0.99;
+            pwm_value = (PWM_RESOLUTION - 1) * pid_value;
+        }
+
+        // Some sanity checking
+        if ((tempHistory.back() < 0.f) || (tempHistory.back() > 140.f)) {
+            printf("Sanity Check failed, setting pwm to 1");
+            pwm_value = 1;
+        }
     }
 }
 
 void thermocouple_task(void *pvParameter) {
     ESP_LOGI("task", "Created: receiver_task");
     QueueHandle_t thermocouple_queue = (QueueHandle_t)pvParameter;
-
-    // Init sensor
-    //max31856_cfg_t max31856 = max31856_init();
-    //thermocouple_set_type(&max31856, MAX31856_TCTYPE_K);
 
     if(thermocouple_queue == NULL){
 	    ESP_LOGI("queue", "Not Ready: thermocouple_queue");
@@ -123,17 +197,17 @@ void thermocouple_task(void *pvParameter) {
     while(1){
         max31865_clear_fault_status(&tempSensorDevice);
         max31865_start_measurement(&tempSensorDevice);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(80));
         max31865_read_temperature(&tempSensorDevice, &temp);
         item.temperature = temp;
         //printf("Read Temperature %f\n", temp);
         xQueueSend(thermocouple_queue,&item,(TickType_t )0);
-        vTaskDelay(500/portTICK_PERIOD_MS);
+        vTaskDelay(120/portTICK_PERIOD_MS);
     }
 }
 
 void create_tasks(void) {
-    thermocouple_queue = xQueueCreate(5, sizeof(struct queueItem));
+    thermocouple_queue = xQueueCreate(10, sizeof(struct queueItem));
     if(thermocouple_queue != NULL){
 	    ESP_LOGI("queue", "Created: thermocouple_queue");
         vTaskDelay(1000/portTICK_PERIOD_MS);
@@ -145,12 +219,17 @@ void create_tasks(void) {
 
 }
 
-gptimer_handle_t pwm_timer;
-
 bool pwm_alarm(gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata, void *user_ctx) {
-    //ESP_LOGI("muh", "alarm!!!");
     s_led_state = 1 - s_led_state;
     gpio_set_level(LED_GPIO, s_led_state);
+    
+    int count = 0;
+    if (s_led_state == 1) {
+        count = PWM_RESOLUTION - pwm_value;
+    } else {
+        count = pwm_value;
+    }
+    gptimer_set_raw_count(timer, count);
     return true;
 }
 
@@ -161,25 +240,18 @@ void init_pwm() {
     gptimer_config_t cfg;
     cfg.clk_src = GPTIMER_CLK_SRC_DEFAULT;
     cfg.direction = GPTIMER_COUNT_UP;
-    cfg.resolution_hz = 32768;     // in Hz
+    cfg.resolution_hz = PWM_RESOLUTION * PWM_SPEED;     // in Hz
     cfg.intr_priority = 0;  /*if set to 0, the driver will try to allocate an interrupt with a relative low priority (1,2,3) */
     cfg.flags.intr_shared = 0; // dont want to share interrupt
 
     ESP_ERROR_CHECK(gptimer_new_timer(&cfg, &pwm_timer));
-
-    //together with resolution will get seconds
-    //gptimer_set_raw_count
-    //gptimer_get_raw_count
-    //gptimer_get_resolution
-    //
-    //gptimer_get_captured_count // within ISR
 
     gptimer_event_callbacks_t cbs;
     cbs.on_alarm = pwm_alarm;
     gptimer_register_event_callbacks(pwm_timer, &cbs, nullptr /* user data */);
 
     gptimer_alarm_config_t alarm_config;    //given as ptr so change there?
-    alarm_config.alarm_count = 2 * 32768;  // after 10s cause alarm
+    alarm_config.alarm_count = (int)(PWM_RESOLUTION);  // after 10s cause alarm
     alarm_config.reload_count = 0;  // what to set the timer register to
     alarm_config.flags.auto_reload_on_alarm = 1;         // 0... not auto reload 1... auto relaod
 
@@ -192,6 +264,7 @@ void init_pwm() {
 
 extern "C" void app_main(void)
 {
+    gpio_set_level(LED_GPIO, 0);
     init_pwm();
     
     configure_tempsensor();

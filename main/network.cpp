@@ -65,16 +65,16 @@ static const httpd_uri_t root = {
     .handler = root_get_handler
 };
 
-static const httpd_uri_t get_led_on = {
-    .uri = "/led/on",
+static const httpd_uri_t get_increase = {
+    .uri = "/increase",
     .method = HTTP_GET,
-    .handler = led_on_handler
+    .handler = increase_handler
 };
 
-static const httpd_uri_t get_led_off = {
-    .uri = "/led/off",
+static const httpd_uri_t get_decrease = {
+    .uri = "/decrease",
     .method = HTTP_GET,
-    .handler = led_off_handler
+    .handler = decrease_handler
 };
 
 static const httpd_uri_t get_temp = {
@@ -103,8 +103,8 @@ httpd_handle_t start_webserver(void)
         // Set URI handlers
         ESP_LOGI(TAG, "Registering URI handlers");
         httpd_register_uri_handler(server, &root);
-        httpd_register_uri_handler(server, &get_led_on);
-        httpd_register_uri_handler(server, &get_led_off);
+        httpd_register_uri_handler(server, &get_increase);
+        httpd_register_uri_handler(server, &get_decrease);
         httpd_register_uri_handler(server, &get_temp);
         httpd_register_uri_handler(server, &get_graph);
         httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, http_404_error_handler);
